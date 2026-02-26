@@ -90,7 +90,7 @@ export function BestWindow() {
     if (isLoading) {
         return (
             <div className="w-full h-24 rounded-2xl border border-white/10 bg-white/5 animate-pulse flex items-center justify-center">
-                <span className="text-white/20 text-xs">Đang phân tích cửa sổ quan sát...</span>
+                <span className="text-white/20 text-xs">Đang phân tích khung giờ quan sát...</span>
             </div>
         );
     }
@@ -101,7 +101,7 @@ export function BestWindow() {
                 style={{ background: "linear-gradient(135deg, rgba(239,68,68,0.08), rgba(239,68,68,0.02))" }}>
                 <Telescope className="h-8 w-8 text-red-400/50 shrink-0" />
                 <div>
-                    <p className="text-sm font-bold text-white/60">Không có cửa sổ quan sát tốt</p>
+                    <p className="text-sm font-bold text-white/60">Không có thời điểm quan sát tốt</p>
                     <p className="text-xs text-white/30 mt-0.5">72 giờ tới điều kiện không thuận lợi. Thử đổi địa điểm?</p>
                 </div>
             </div>
@@ -128,7 +128,18 @@ export function BestWindow() {
             <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
                     <Star className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                    <p className="text-xs font-bold uppercase tracking-wider text-white/50">Cửa sổ quan sát tốt nhất tối nay</p>
+                    <p className="text-xs font-bold uppercase tracking-wider text-white/50">
+                        {(() => {
+                            // Dùng countdown để xác định có phải tối nay không
+                            // nếu còn hơn 6 tiếng thì không thể là "tối nay"
+                            const diffMs = bestWindow.start.getTime() - now.getTime();
+                            const isTonight = diffMs >= 0 && diffMs <= 6 * 3600000;
+                            const dateLabel = isTonight
+                                ? "tối nay"
+                                : bestWindow.start.toLocaleDateString("vi-VN", { weekday: "short", day: "2-digit", month: "2-digit" });
+                            return `Thời điểm quan sát tốt nhất ${dateLabel}`;
+                        })()}
+                    </p>
                 </div>
                 <p className="text-base font-extrabold text-white">
                     {bestWindow.start.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}
