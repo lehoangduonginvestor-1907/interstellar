@@ -4,7 +4,14 @@ import React, { useMemo } from "react";
 import { format, parseISO } from "date-fns";
 import { useAstroData } from "@/hooks/useAstroData";
 import { useAppStore } from "@/store/useAppStore";
-import { calculateTrueTransparency, calculateDynamicSQM, calculateAstroQualityScore, calculateForecastUncertainty } from "@/utils/skyOptics";
+import {
+    calculateTrueTransparency,
+    calculateDynamicSQM,
+    calculateAstroQualityScore,
+    calculateForecastUncertainty,
+    getCelestialPositions,
+    resolveAOD,
+} from "@/utils/skyOptics";
 import { AlertTriangle } from "lucide-react";
 
 // --- 7 Day daily summary cards ---
@@ -30,16 +37,18 @@ function DayCard({ date, score, cloudCover, peak }: { date: Date; score: number;
 
 export function ForecastTimeline() {
     const activeLocation = useAppStore(state => state.getActiveLocation());
-    const { meteo, sevenTimer, isLoading } = useAstroData(activeLocation);
+    const { settings } = useAppStore();
+    const { meteo, airQuality, sevenTimer, isLoading } = useAstroData(activeLocation);
 
     const { timeline, weekSummary, uncertainty } = useMemo(() => {
         if (!meteo.data || !sevenTimer.data || !activeLocation) return { timeline: [], weekSummary: [], uncertainty: 0 };
 
         const mData = meteo.data.hourly;
+        const aqData = airQuality.data?.hourly;
         const sData = sevenTimer.data.dataseries;
         const hours = Math.min(72, mData.time.length);
-        const mockMoonAlt = 20;
-        const mockMoonIllum = 0.5;
+        const lat = activeLocation.lat;
+        const lon = activeLocation.lon;
         const result = [];
         const allScores: number[] = [];
 
@@ -47,27 +56,64 @@ export function ForecastTimeline() {
             const dateObj = parseISO(mData.time[i]);
             const sIdx = Math.min(Math.floor(i / 3), sData.length - 1);
             const cloudCover = mData.cloud_cover[i];
-            const { k, transparency } = calculateTrueTransparency(50, mData.relative_humidity_2m[i], 0.1);
-            const sqm = calculateDynamicSQM(activeLocation.baseBortleSqm, mockMoonAlt, mockMoonIllum, k, 60);
+
+            // ✅ Real celestial positions
+            const { moonAltDeg, moonIllumination, sunAltDeg } = getCelestialPositions(lat, lon, dateObj);
+
+            // ✅ Real AQI (fallback 40 if Air Quality API not loaded yet)
+            const aqi = aqData?.us_aqi?.[i] ?? 40;
+
+            // ✅ Real AOD: settings override > Open-Meteo Air Quality > default 0.1
+            const rawAod = aqData?.aerosol_optical_depth?.[i] ?? null;
+            const { aod } = resolveAOD(settings.aodOverride, rawAod);
+
+            const { k, transparency } = calculateTrueTransparency(aqi, mData.relative_humidity_2m[i], aod);
+
+            // ✅ Real Moon in SQM calculation
+            const sqm = calculateDynamicSQM(activeLocation.baseBortleSqm, moonAltDeg, moonIllumination, k, 60);
+
             const seeingScore = Math.max(0, 100 - ((sData[sIdx].seeing - 1) * 14));
-            const { score, isVetoed } = calculateAstroQualityScore({ cloudCover, sunAlt: -20, trueTransparency: transparency, dynamicSqm: sqm, seeingScore, deltaTempDewPt: mData.temperature_2m[i] - mData.dew_point_2m[i] });
             const hourOfDay = dateObj.getHours();
             const isDaytime = hourOfDay >= 6 && hourOfDay <= 18;
+
+            // ✅ Real Sun altitude for twilight veto (not hardcoded -20)
+            const { score, isVetoed } = calculateAstroQualityScore({
+                cloudCover,
+                sunAlt: isDaytime ? 0 : sunAltDeg, // fast path for obvious daytime
+                trueTransparency: transparency,
+                dynamicSqm: sqm,
+                seeingScore,
+                deltaTempDewPt: mData.temperature_2m[i] - mData.dew_point_2m[i],
+            });
+
             if (!isDaytime && !isVetoed) allScores.push(score);
             result.push({ time: dateObj, hourOfDay, score: isDaytime ? 0 : score, isVetoed: isDaytime ? true : isVetoed, isDaytime, cloudCover, sqm });
         }
 
-        // 7-day daily best
+        // 7-day daily best — also uses real data
         const dailyMap = new Map<string, { scores: number[], cloud: number[] }>();
         for (let i = 0; i < Math.min(168, mData.time.length); i++) {
             const d = parseISO(mData.time[i]);
             const key = format(d, "yyyy-MM-dd");
             if (!dailyMap.has(key)) dailyMap.set(key, { scores: [], cloud: [] });
             dailyMap.get(key)!.cloud.push(mData.cloud_cover[i]);
-            const { k, transparency } = calculateTrueTransparency(50, mData.relative_humidity_2m[i], 0.1);
-            const sqm = calculateDynamicSQM(activeLocation.baseBortleSqm, mockMoonAlt, mockMoonIllum, k, 60);
+
+            const { moonAltDeg, moonIllumination, sunAltDeg } = getCelestialPositions(lat, lon, d);
+            const aqi = aqData?.us_aqi?.[i] ?? 40;
+            const rawAod = aqData?.aerosol_optical_depth?.[i] ?? null;
+            const { aod } = resolveAOD(settings.aodOverride, rawAod);
+            const { k, transparency } = calculateTrueTransparency(aqi, mData.relative_humidity_2m[i], aod);
+            const sqm = calculateDynamicSQM(activeLocation.baseBortleSqm, moonAltDeg, moonIllumination, k, 60);
             const sIdx = Math.min(Math.floor(i / 3), sData.length - 1);
-            const { score } = calculateAstroQualityScore({ cloudCover: mData.cloud_cover[i], sunAlt: d.getHours() < 6 || d.getHours() > 18 ? -20 : 0, trueTransparency: transparency, dynamicSqm: sqm, seeingScore: Math.max(0, 100 - ((sData[sIdx].seeing - 1) * 14)), deltaTempDewPt: mData.temperature_2m[i] - mData.dew_point_2m[i] });
+            const hourOfD = d.getHours();
+            const { score } = calculateAstroQualityScore({
+                cloudCover: mData.cloud_cover[i],
+                sunAlt: (hourOfD < 6 || hourOfD > 18) ? sunAltDeg : 0,
+                trueTransparency: transparency,
+                dynamicSqm: sqm,
+                seeingScore: Math.max(0, 100 - ((sData[sIdx].seeing - 1) * 14)),
+                deltaTempDewPt: mData.temperature_2m[i] - mData.dew_point_2m[i],
+            });
             dailyMap.get(key)!.scores.push(score);
         }
         const weekOut = Array.from(dailyMap.entries()).slice(0, 7).map(([dateStr, { scores, cloud }]) => ({
@@ -75,13 +121,12 @@ export function ForecastTimeline() {
             score: Math.round(Math.max(...scores.filter(s => s > 0), 0)),
             cloudCover: Math.round(cloud.reduce((a, b) => a + b) / cloud.length),
         }));
-        const peakScore = Math.max(...weekOut.map(d => d.score));
 
         const sigma = calculateForecastUncertainty(allScores);
         const sigmaPercent = allScores.length > 0 ? (sigma / (allScores.reduce((a, b) => a + b) / allScores.length)) * 100 : 0;
 
         return { timeline: result, weekSummary: weekOut, uncertainty: sigmaPercent };
-    }, [meteo.data, sevenTimer.data, activeLocation]);
+    }, [meteo.data, airQuality.data, sevenTimer.data, activeLocation, settings.aodOverride]);
 
     const getDayLabel = (d: Date) => format(d, "EEE dd/MM");
 
@@ -116,7 +161,7 @@ export function ForecastTimeline() {
                                 ⚠️ Độ tin cậy thấp (σ={uncertainty.toFixed(0)}%)
                             </span>
                         )}
-                        <span className="text-[10px] text-white/20 border border-white/8 rounded-lg px-2.5 py-1 uppercase tracking-widest">Open-Meteo · 7Timer</span>
+                        <span className="text-[10px] text-white/20 border border-white/8 rounded-lg px-2.5 py-1 uppercase tracking-widest">Open-Meteo · 7Timer · SunCalc</span>
                     </div>
                 </div>
 

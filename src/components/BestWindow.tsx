@@ -3,14 +3,20 @@
 import React, { useMemo, useEffect, useState } from "react";
 import { useAstroData } from "@/hooks/useAstroData";
 import { useAppStore } from "@/store/useAppStore";
-import { calculateTrueTransparency, calculateDynamicSQM, calculateAstroQualityScore } from "@/utils/skyOptics";
+import {
+    calculateTrueTransparency,
+    calculateDynamicSQM,
+    calculateAstroQualityScore,
+    getCelestialPositions,
+    resolveAOD,
+} from "@/utils/skyOptics";
 import { parseISO } from "date-fns";
 import { Telescope, Clock, Star } from "lucide-react";
 
 export function BestWindow() {
     const activeLocation = useAppStore(s => s.getActiveLocation());
     const { settings, addNotification, notifications } = useAppStore();
-    const { meteo, sevenTimer, isLoading } = useAstroData(activeLocation);
+    const { meteo, airQuality, sevenTimer, isLoading } = useAstroData(activeLocation);
     const [now, setNow] = useState(new Date());
 
     // Live clock
@@ -23,45 +29,83 @@ export function BestWindow() {
         if (!meteo.data || !sevenTimer.data || !activeLocation) return null;
 
         const mData = meteo.data.hourly;
+        const aqData = airQuality.data?.hourly;
         const sData = sevenTimer.data.dataseries;
         const hours = Math.min(72, mData.time.length);
-        const mockMoonAlt = 20;
-        const mockMoonIllum = 0.5;
+
+        const lat = activeLocation.lat;
+        const lon = activeLocation.lon;
 
         let bestScore = 0;
         let bestIdx = -1;
+        let bestStartIdx = -1; // Track the actual start of the consecutive run
         let consecutive = 0;
+        let runStart = -1;
 
         for (let i = 0; i < hours; i++) {
             const dateObj = parseISO(mData.time[i]);
             const hourOfDay = dateObj.getHours();
-            if (hourOfDay >= 6 && hourOfDay <= 18) { consecutive = 0; continue; }
+
+            // Skip daytime hours (rough pre-filter — sunAlt veto will catch edge cases precisely)
+            if (hourOfDay >= 6 && hourOfDay <= 18) { consecutive = 0; runStart = -1; continue; }
+
+            // ✅ Real Moon & Sun positions from SunCalc
+            const { moonAltDeg, moonIllumination, sunAltDeg } = getCelestialPositions(lat, lon, dateObj);
+
+            // ✅ Real AQI from Open-Meteo Air Quality (fallback to 40 if API not loaded yet)
+            const aqi = aqData?.us_aqi?.[i] ?? 40;
+
+            // ✅ Real AOD: settings override > CAMS API > Open-Meteo Air Quality > default 0.1
+            const rawAod = aqData?.aerosol_optical_depth?.[i] ?? null;
+            const { aod } = resolveAOD(settings.aodOverride, rawAod);
 
             const cloudCover = mData.cloud_cover[i];
-            const { k, transparency } = calculateTrueTransparency(50, mData.relative_humidity_2m[i], 0.1);
-            const sqm = calculateDynamicSQM(activeLocation.baseBortleSqm, mockMoonAlt, mockMoonIllum, k, 60);
+            const { k, transparency } = calculateTrueTransparency(aqi, mData.relative_humidity_2m[i], aod);
+
+            // ✅ Real Moon position in SQM calculation
+            const sqm = calculateDynamicSQM(
+                activeLocation.baseBortleSqm,
+                moonAltDeg,
+                moonIllumination,
+                k,
+                60
+            );
+
             const sIdx = Math.min(Math.floor(i / 3), sData.length - 1);
             const seeingScore = Math.max(0, 100 - ((sData[sIdx].seeing - 1) * 14));
-            const { score, isVetoed } = calculateAstroQualityScore({ cloudCover, sunAlt: -20, trueTransparency: transparency, dynamicSqm: sqm, seeingScore, deltaTempDewPt: mData.temperature_2m[i] - mData.dew_point_2m[i] });
+
+            // ✅ Real Sun altitude for twilight veto (replaces hardcoded -20)
+            const { score, isVetoed } = calculateAstroQualityScore({
+                cloudCover,
+                sunAlt: sunAltDeg,
+                trueTransparency: transparency,
+                dynamicSqm: sqm,
+                seeingScore,
+                deltaTempDewPt: mData.temperature_2m[i] - mData.dew_point_2m[i],
+            });
 
             if (!isVetoed && score > 50) {
+                if (runStart === -1) runStart = i; // mark start of consecutive run
                 consecutive++;
                 if (score > bestScore && consecutive >= 2) {
                     bestScore = score;
                     bestIdx = i;
+                    bestStartIdx = runStart; // use actual start, not offset idx
                 }
             } else {
                 consecutive = 0;
+                runStart = -1;
             }
         }
 
-        if (bestIdx < 0) return null;
+        if (bestIdx < 0 || bestStartIdx < 0) return null;
 
-        const windowStart = parseISO(mData.time[bestIdx]);
+        // Use the TRUE start of the consecutive window, not offset by 1
+        const windowStart = parseISO(mData.time[bestStartIdx]);
         const windowEnd = new Date(windowStart.getTime() + 2 * 60 * 60 * 1000);
         return { start: windowStart, end: windowEnd, score: bestScore };
 
-    }, [meteo.data, sevenTimer.data, activeLocation]);
+    }, [meteo.data, airQuality.data, sevenTimer.data, activeLocation, settings.aodOverride]);
 
     // Auto-add notification if above threshold
     useEffect(() => {
@@ -130,8 +174,6 @@ export function BestWindow() {
                     <Star className="h-3.5 w-3.5 text-amber-400 shrink-0" />
                     <p className="text-xs font-bold uppercase tracking-wider text-white/50">
                         {(() => {
-                            // Dùng countdown để xác định có phải tối nay không
-                            // nếu còn hơn 6 tiếng thì không thể là "tối nay"
                             const diffMs = bestWindow.start.getTime() - now.getTime();
                             const isTonight = diffMs >= 0 && diffMs <= 6 * 3600000;
                             const dateLabel = isTonight

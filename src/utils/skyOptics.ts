@@ -1,3 +1,33 @@
+import SunCalc from "suncalc";
+
+// ---------------------------------------------------------------------------
+// 0. Real-time Celestial Positions — SunCalc
+//
+// Returns Moon altitude, illumination fraction, and Sun altitude
+// for a given lat/lon and date/time. Replaces all mock values.
+// ---------------------------------------------------------------------------
+export interface CelestialPositions {
+  moonAltDeg: number;        // –90 … +90°  (negative = below horizon)
+  moonIllumination: number;  // 0.0 … 1.0
+  sunAltDeg: number;         // –90 … +90°  (veto when > –18°)
+}
+
+export const getCelestialPositions = (
+  lat: number,
+  lon: number,
+  date: Date
+): CelestialPositions => {
+  const moonPos = SunCalc.getMoonPosition(date, lat, lon);
+  const moonIllum = SunCalc.getMoonIllumination(date);
+  const sunPos = SunCalc.getPosition(date, lat, lon);
+
+  return {
+    moonAltDeg: moonPos.altitude * (180 / Math.PI),
+    moonIllumination: moonIllum.fraction,
+    sunAltDeg: sunPos.altitude * (180 / Math.PI),
+  };
+};
+
 /**
  * Interstellar Atmospheric Optics & Astronomy Core Models
  *

@@ -26,6 +26,21 @@ export interface MeteoResponse {
 }
 
 /**
+ * Open-Meteo Air Quality response — provides real AQI and AOD per hour
+ */
+export interface AirQualityHourlyData {
+    time: string[];
+    us_aqi: number[];                // US AQI 0–500
+    aerosol_optical_depth: number[]; // AOD 550 nm (replaces hardcoded 0.1)
+    dust: number[];                  // Dust µg/m³ (bonus warning layer)
+}
+
+export interface AirQualityResponse {
+    hourly: AirQualityHourlyData;
+    timezone: string;
+}
+
+/**
  * 7Timer Astro Response (Mocked/Mapped)
  */
 export interface SevenTimerAstroItem {
@@ -50,6 +65,18 @@ const getMeteoForecast = async (lat: number, lon: number): Promise<MeteoResponse
     return res.json();
 };
 
+/**
+ * Open-Meteo Air Quality API — free, no API key required.
+ * Provides real-time AQI and Aerosol Optical Depth per hour,
+ * replacing the previous hardcoded AQI=50 and AOD=0.1.
+ */
+const getAirQuality = async (lat: number, lon: number): Promise<AirQualityResponse> => {
+    const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&hourly=us_aqi,aerosol_optical_depth,dust&timezone=auto&forecast_days=7`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Failed to fetch Air Quality data");
+    return res.json();
+};
+
 const getSevenTimerAstro = async (lat: number, lon: number): Promise<SevenTimerResponse> => {
     const url = `https://www.7timer.info/bin/astro.php?lon=${lon}&lat=${lat}&ac=0&unit=metric&output=json&tzshift=0`;
     const res = await fetch(url);
@@ -66,6 +93,14 @@ export function useAstroData(location?: LocationInfo) {
         enabled: !!location,
     });
 
+    const airQualityQuery = useQuery({
+        queryKey: ["airquality", location?.id],
+        queryFn: () => getAirQuality(location!.lat, location!.lon),
+        enabled: !!location,
+        // Air quality changes slowly — cache for 30 min
+        staleTime: 30 * 60 * 1000,
+    });
+
     const sevenTimerQuery = useQuery({
         queryKey: ["7timer", location?.id],
         queryFn: () => getSevenTimerAstro(location!.lat, location!.lon),
@@ -74,8 +109,9 @@ export function useAstroData(location?: LocationInfo) {
 
     return {
         meteo: meteoQuery,
+        airQuality: airQualityQuery,
         sevenTimer: sevenTimerQuery,
-        isLoading: meteoQuery.isLoading || sevenTimerQuery.isLoading,
+        isLoading: meteoQuery.isLoading || sevenTimerQuery.isLoading || airQualityQuery.isLoading,
         isError: meteoQuery.isError || sevenTimerQuery.isError,
     };
 }
